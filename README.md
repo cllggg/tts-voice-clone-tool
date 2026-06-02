@@ -276,5 +276,5 @@ python3 app.py --port 9000
 ---
 
 ## 许可
-
 本项目仅用于学习和研究目的。使用的 Coqui XTTS v2 模型遵循其原始许可协议（CPML）。
+liyijia 2026
