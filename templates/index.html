@@ -488,6 +488,34 @@
             white-space: nowrap;
         }
         .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; }
+
+        /* ---- Stream Progress ---- */
+        .stream-progress {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            background: rgba(108, 92, 231, 0.08);
+            border: 1px solid rgba(108, 92, 231, 0.2);
+            border-radius: var(--radius-sm);
+            margin-top: 0.75rem;
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+        }
+        .stream-progress-icon {
+            flex-shrink: 0;
+            animation: pulse 1s infinite;
+        }
+        .stream-progress-text { flex: 1; }
+        .stream-progress.done {
+            background: rgba(0, 214, 143, 0.08);
+            border-color: rgba(0, 214, 143, 0.2);
+            color: var(--success);
+        }
+        .stream-progress.done .stream-progress-icon {
+            animation: none;
+        }
+
         .btn-primary {
             background: linear-gradient(135deg, var(--primary), #a78bfa);
             color: white;
@@ -775,6 +803,10 @@
                     <button class="btn btn-secondary" id="playAgainBtn">&#9654; 重新播放</button>
                     <button class="btn btn-danger btn-sm" id="clearOutputsBtn">&#128465; 清除输出</button>
                 </div>
+                <div class="stream-progress" id="streamProgress" style="display:none;">
+                    <span class="stream-progress-icon">&#9654;</span>
+                    <span class="stream-progress-text" id="streamProgressText">正在播放...</span>
+                </div>
             </div>
 
         </div>
@@ -837,7 +869,10 @@
             conn2: document.getElementById('conn2'),
             tipUpload: document.getElementById('tip-upload'),
             tipVoice: document.getElementById('tip-voice'),
-            tipGenerate: document.getElementById('tip-generate')
+            tipGenerate: document.getElementById('tip-generate'),
+            streamProgress: document.getElementById('streamProgress'),
+            streamProgressText: document.getElementById('streamProgressText'),
+            streamProgressIcon: document.querySelector('.stream-progress-icon')
         };
 
         /* ---- Utility ---- */
@@ -1284,15 +1319,19 @@
                         }
 
                         chunksReceived++;
-                        showToast(`收到第 ${chunksReceived} 个音频块 (${(chunkData.length / 1024).toFixed(0)} KB)`, 'info');
 
                         if (!firstChunkReceived) {
                             firstChunkReceived = true;
                             hideLoading();
                             elements.resultCard.classList.add('visible');
+                            elements.streamProgress.style.display = 'flex';
                             document.getElementById('step3').classList.add('completed');
                             updateSteps();
+                        } else {
+                            // Update progress on subsequent chunks (avoid flickering on first)
+                            elements.streamProgress.style.display = 'flex';
                         }
+                        elements.streamProgressText.textContent = `正在播放第 ${chunksReceived} 句...`;
 
                         // Play via Blob URL + HTML Audio element (same approach as stream preview)
                         try {
@@ -1317,6 +1356,9 @@
                 elements.tipGenerate.className = 'guidance-tip done';
                 elements.tipGenerate.innerHTML =
                     `<span class="tip-icon">&#10003;</span><span>流式播放完成！共 ${chunksReceived} 个句子</span>`;
+                elements.streamProgress.className = 'stream-progress done';
+                if (elements.streamProgressIcon) elements.streamProgressIcon.textContent = '\u2713';
+                elements.streamProgressText.textContent = `播放完成（共 ${chunksReceived} 句）`;
                 if (chunksReceived > 0) {
                     document.getElementById('step3').classList.add('completed');
                     updateSteps();

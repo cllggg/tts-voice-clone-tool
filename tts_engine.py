@@ -1,10 +1,15 @@
 import os
 import re
+import io
 import tempfile
-import hashlib
 import logging
 import warnings
 from pathlib import Path
+
+import numpy as np
+import librosa
+import scipy.io.wavfile as wavfile
+import soundfile as sf
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -116,10 +121,6 @@ class VoiceCloneEngine:
         if speed == 1.0:
             return wav_path_or_buffer
 
-        import numpy as np
-        import soundfile as sf
-        import librosa
-
         if is_path:
             y, sr = sf.read(wav_path_or_buffer)
         else:
@@ -133,7 +134,6 @@ class VoiceCloneEngine:
             sf.write(wav_path_or_buffer, y_stretched, sr)
             return wav_path_or_buffer
         else:
-            import io
             buffer = io.BytesIO()
             sf.write(buffer, y_stretched, sr, format='WAV')
             buffer.seek(0)
@@ -205,16 +205,11 @@ class VoiceCloneEngine:
             split_sentences=True
         )
 
-        import numpy as np
-        import scipy.io.wavfile as wavfile
-        import io
-
         sample_rate = 24000
         wav_np = np.array(wav, dtype=np.float32)
 
         # Apply speed adjustment if needed
         if speed != 1.0:
-            import librosa
             wav_np = librosa.effects.time_stretch(y=wav_np, rate=speed)
 
         wav_int16 = (wav_np * 32767).astype(np.int16)
@@ -262,10 +257,6 @@ class VoiceCloneEngine:
 
         text = self._preprocess_text(text, language)
 
-        import numpy as np
-        import scipy.io.wavfile as wavfile
-        import io
-
         sample_rate = 24000
 
         # Split into sentences
@@ -290,7 +281,6 @@ class VoiceCloneEngine:
 
             # Apply speed adjustment
             if speed != 1.0:
-                import librosa
                 wav_np = librosa.effects.time_stretch(y=wav_np, rate=speed)
 
             wav_int16 = (wav_np * 32767).astype(np.int16)
@@ -306,15 +296,7 @@ class VoiceCloneEngine:
         
         Handles both Chinese and Latin-script punctuation.
         """
-        # Sentence-ending punctuation patterns
-        if language in ("zh-cn", "ja", "ko"):
-            # CJK: split on Chinese/Japanese/Korean punctuation
-            pattern = r'(?<=[。！？；\n])\s*|(?<=[\.\!\?;]\s+)(?=[A-Z\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af])'
-        else:
-            # Latin: split on . ! ? ; followed by space and capital letter
-            pattern = r'(?<=[\.\!\?;]\s+)(?=[A-Z])'
-
-        # Also split on explicit newlines
+        # Split on explicit newlines first, then sentence-ending punctuation
         paragraphs = text.split('\n\n')
         sentences = []
         for para in paragraphs:

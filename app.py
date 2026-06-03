@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import hashlib
 import logging
@@ -6,7 +7,6 @@ import uuid
 import shutil
 from pathlib import Path
 from datetime import datetime
-from functools import wraps
 
 # Intel CPU optimization: set thread environment before any PyTorch/TTS imports
 cpu_count = os.cpu_count() or 8
@@ -84,8 +84,9 @@ def _evict_cache_if_needed():
 
     while total_size > MAX_CACHE_SIZE_MB and len(cache_files) > 1:
         oldest = cache_files.pop(0)
+        size_mb = oldest.stat().st_size / (1024 * 1024)
         oldest.unlink(missing_ok=True)
-        total_size -= oldest.stat().st_size / (1024 * 1024) if oldest.exists() else 0
+        total_size -= size_mb
 
     # Also remove expired entries
     now = datetime.now().timestamp()
@@ -115,6 +116,47 @@ def _find_voice_path(voice_id):
         if path.exists():
             return path
     return None
+
+
+def _sanitize_filename(name):
+    """Remove path traversal characters and keep only safe filename chars."""
+    return re.sub(r'[^\w\-]', '', name)
+
+
+def _validate_synthesis_request(data):
+    """Validate synthesis request parameters.
+    
+    Returns:
+        (text, voice_id, language, speed, speaker_path) on success
+        (None, None, None, None, error_response_tuple) on failure
+    """
+    if not data:
+        return (None, None, None, None, (jsonify({"error": "请求数据为空"}), 400))
+
+    text = data.get("text", "").strip()
+    voice_id = data.get("voice_id", session.get("last_voice_id"))
+    language = data.get("language", "zh-cn")
+    speed = float(data.get("speed", 1.0))
+
+    if not text:
+        return (None, None, None, None, (jsonify({"error": "文字内容不能为空"}), 400))
+    if len(text) > 5000:
+        return (None, None, None, None, (jsonify({"error": f"文字长度不能超过 5000 字符（当前 {len(text)} 字符）"}), 400))
+    if speed < 0.5 or speed > 2.0:
+        return (None, None, None, None, (jsonify({"error": "语速必须在 0.5 到 2.0 之间"}), 400))
+
+    valid_langs = [l["code"] for l in tts_engine.list_supported_languages()]
+    if language not in valid_langs:
+        return (None, None, None, None, (jsonify({"error": f"不支持的语言: {language}"}), 400))
+
+    if not voice_id:
+        return (None, None, None, None, (jsonify({"error": "请先上传语音样本"}), 400))
+
+    speaker_path = _find_voice_path(voice_id)
+    if not speaker_path:
+        return (None, None, None, None, (jsonify({"error": "声纹样本未找到，请重新上传"}), 404))
+
+    return (text, voice_id, language, speed, speaker_path)
 
 
 @app.route("/")
@@ -193,33 +235,9 @@ def upload_audio():
 @app.route("/api/synthesize", methods=["POST"])
 def synthesize():
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "请求数据为空"}), 400
-
-    text = data.get("text", "").strip()
-    voice_id = data.get("voice_id", session.get("last_voice_id"))
-    language = data.get("language", "zh-cn")
-    speed = float(data.get("speed", 1.0))
-
-    # --- Input validation ---
-    if not text:
-        return jsonify({"error": "文字内容不能为空"}), 400
-    if len(text) > 5000:
-        return jsonify({"error": f"文字长度不能超过 5000 字符（当前 {len(text)} 字符）"}), 400
-    if speed < 0.5 or speed > 2.0:
-        return jsonify({"error": "语速必须在 0.5 到 2.0 之间"}), 400
-
-    # Validate language
-    valid_langs = [l["code"] for l in tts_engine.list_supported_languages()]
-    if language not in valid_langs:
-        return jsonify({"error": f"不支持的语言: {language}"}), 400
-
-    if not voice_id:
-        return jsonify({"error": "请先上传语音样本"}), 400
-
-    speaker_path = _find_voice_path(voice_id)
-    if not speaker_path:
-        return jsonify({"error": "声纹样本未找到，请重新上传"}), 404
+    text, voice_id, language, speed, speaker_path = _validate_synthesis_request(data)
+    if text is None:
+        return speaker_path  # speaker_path is the error response tuple
 
     # --- Cache check ---
     cache_key = _get_cache_key(text, voice_id, language, speed)
@@ -267,32 +285,9 @@ def synthesize():
 @app.route("/api/stream", methods=["POST"])
 def synthesize_stream():
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "请求数据为空"}), 400
-
-    text = data.get("text", "").strip()
-    voice_id = data.get("voice_id", session.get("last_voice_id"))
-    language = data.get("language", "zh-cn")
-    speed = float(data.get("speed", 1.0))
-
-    # --- Input validation ---
-    if not text:
-        return jsonify({"error": "文字内容不能为空"}), 400
-    if len(text) > 5000:
-        return jsonify({"error": f"文字长度不能超过 5000 字符（当前 {len(text)} 字符）"}), 400
-    if speed < 0.5 or speed > 2.0:
-        return jsonify({"error": "语速必须在 0.5 到 2.0 之间"}), 400
-
-    valid_langs = [l["code"] for l in tts_engine.list_supported_languages()]
-    if language not in valid_langs:
-        return jsonify({"error": f"不支持的语言: {language}"}), 400
-
-    if not voice_id:
-        return jsonify({"error": "请先上传语音样本"}), 400
-
-    speaker_path = _find_voice_path(voice_id)
-    if not speaker_path:
-        return jsonify({"error": "声纹样本未找到，请重新上传"}), 404
+    text, _voice_id, language, speed, speaker_path = _validate_synthesis_request(data)
+    if text is None:
+        return speaker_path
 
     try:
         audio_buffer, sample_rate = tts_engine.clone_voice_stream(
@@ -326,31 +321,9 @@ def stream_chunks():
     The frontend reads and plays each chunk immediately upon arrival.
     """
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "请求数据为空"}), 400
-
-    text = data.get("text", "").strip()
-    voice_id = data.get("voice_id", session.get("last_voice_id"))
-    language = data.get("language", "zh-cn")
-    speed = float(data.get("speed", 1.0))
-
-    if not text:
-        return jsonify({"error": "文字内容不能为空"}), 400
-    if len(text) > 5000:
-        return jsonify({"error": f"文字长度不能超过 5000 字符"}), 400
-    if speed < 0.5 or speed > 2.0:
-        return jsonify({"error": "语速必须在 0.5 到 2.0 之间"}), 400
-
-    valid_langs = [l["code"] for l in tts_engine.list_supported_languages()]
-    if language not in valid_langs:
-        return jsonify({"error": f"不支持的语言: {language}"}), 400
-
-    if not voice_id:
-        return jsonify({"error": "请先上传语音样本"}), 400
-
-    speaker_path = _find_voice_path(voice_id)
-    if not speaker_path:
-        return jsonify({"error": "声纹样本未找到，请重新上传"}), 404
+    text, _voice_id, language, speed, speaker_path = _validate_synthesis_request(data)
+    if text is None:
+        return speaker_path
 
     def generate():
         import struct
@@ -384,6 +357,9 @@ def stream_chunks():
 
 @app.route("/api/delete-voice/<voice_id>", methods=["DELETE"])
 def delete_voice(voice_id):
+    voice_id = _sanitize_filename(voice_id)
+    if not voice_id:
+        return jsonify({"error": "无效的声纹 ID"}), 400
     deleted = False
     for ext in ('.wav', '.mp3', '.flac', '.ogg'):
         path = VOICE_PROFILES_DIR / f"{voice_id}{ext}"
@@ -398,6 +374,9 @@ def delete_voice(voice_id):
 
 @app.route("/api/voice-audio/<voice_id>")
 def voice_audio(voice_id):
+    voice_id = _sanitize_filename(voice_id)
+    if not voice_id:
+        return jsonify({"error": "无效的声纹 ID"}), 400
     for ext in ('.wav', '.mp3', '.flac', '.ogg'):
         path = VOICE_PROFILES_DIR / f"{voice_id}{ext}"
         if path.exists():
@@ -407,7 +386,8 @@ def voice_audio(voice_id):
 
 @app.route("/output/<filename>")
 def download_audio(filename):
-    path = OUTPUT_DIR / filename
+    safe_name = _sanitize_filename(filename)
+    path = OUTPUT_DIR / safe_name
     if not path.exists():
         return jsonify({"error": "File not found"}), 404
     return send_file(str(path), mimetype="audio/wav")
@@ -433,11 +413,37 @@ def status():
 
 if __name__ == "__main__":
     import argparse
+    import threading
     parser = argparse.ArgumentParser(description="TTS Voice Clone Tool")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--warmup", action="store_true", default=True,
+                        help="Run model warm-up after startup (default: True)")
+    parser.add_argument("--no-warmup", action="store_false", dest="warmup",
+                        help="Skip model warm-up")
     args = parser.parse_args()
 
     logger.info(f"Starting TTS Voice Clone Tool on {args.host}:{args.port}")
+
+    def warmup():
+        """Run a short warm-up synthesis to trigger model graph compilation."""
+        try:
+            first_voice = next(VOICE_PROFILES_DIR.glob("*.wav"), None)
+            if not first_voice:
+                first_voice = next(VOICE_PROFILES_DIR.glob("*.mp3"), None)
+            if first_voice and args.warmup:
+                logger.info("Running model warm-up (this may take 10-30s)...")
+                tts_engine.clone_voice(
+                    text="这是一个预热测试。",
+                    speaker_audio_path=str(first_voice),
+                    language="zh-cn",
+                    speed=1.0
+                )
+                logger.info("Model warm-up complete!")
+        except Exception as e:
+            logger.warning(f"Model warm-up skipped: {e}")
+
+    threading.Thread(target=warmup, daemon=True).start()
+
     app.run(host=args.host, port=args.port, debug=args.debug)
