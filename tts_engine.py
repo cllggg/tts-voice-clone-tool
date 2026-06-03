@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import hashlib
 import logging
 import warnings
 from pathlib import Path
@@ -100,6 +101,44 @@ class VoiceCloneEngine:
         logger.debug(f"Text preprocessed ({language}): {len(text)} chars")
         return text
 
+    def _apply_speed(self, wav_path_or_buffer, speed, is_path=True):
+        """Apply time-stretching to change speed without altering pitch.
+        
+        Args:
+            wav_path_or_buffer: path to WAV file or BytesIO buffer
+            speed: speed factor (0.5 = half speed, 2.0 = double speed)
+            is_path: if True, treat as file path; if False, treat as buffer
+        
+        Returns:
+            If is_path: path to speed-adjusted WAV file
+            If not is_path: BytesIO buffer of speed-adjusted WAV
+        """
+        if speed == 1.0:
+            return wav_path_or_buffer
+
+        import numpy as np
+        import soundfile as sf
+        import librosa
+
+        if is_path:
+            y, sr = sf.read(wav_path_or_buffer)
+        else:
+            wav_path_or_buffer.seek(0)
+            y, sr = sf.read(wav_path_or_buffer)
+
+        # Time stretch using phase vocoder
+        y_stretched = librosa.effects.time_stretch(y=y, rate=speed)
+
+        if is_path:
+            sf.write(wav_path_or_buffer, y_stretched, sr)
+            return wav_path_or_buffer
+        else:
+            import io
+            buffer = io.BytesIO()
+            sf.write(buffer, y_stretched, sr, format='WAV')
+            buffer.seek(0)
+            return buffer
+
     def _validate_audio(self, audio_path):
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -108,11 +147,14 @@ class VoiceCloneEngine:
         if ext not in ('.wav', '.mp3', '.flac', '.ogg'):
             raise ValueError(f"Unsupported audio format: {ext}. Use WAV, MP3, FLAC, or OGG.")
 
-    def clone_voice(self, text, speaker_audio_path, language="zh-cn", output_path=None):
+    def clone_voice(self, text, speaker_audio_path, language="zh-cn", output_path=None, speed=1.0):
         self._validate_audio(speaker_audio_path)
 
         if not text or not text.strip():
             raise ValueError("Text cannot be empty.")
+
+        if speed < 0.5 or speed > 2.0:
+            raise ValueError("Speed must be between 0.5 and 2.0")
 
         text = self._preprocess_text(text, language)
 
@@ -128,7 +170,7 @@ class VoiceCloneEngine:
         if language not in supported_langs:
             logger.warning(f"Language '{language}' may not be supported. Supported: {supported_langs}")
 
-        logger.info(f"Generating speech for text ({language}): {text[:50]}...")
+        logger.info(f"Generating speech for text ({language}, speed={speed}): {text[:50]}...")
         self.model.tts_to_file(
             text=text,
             file_path=output_path,
@@ -137,17 +179,25 @@ class VoiceCloneEngine:
             split_sentences=True
         )
 
+        # Apply speed adjustment if needed
+        if speed != 1.0:
+            logger.info(f"Applying speed adjustment: {speed}x")
+            output_path = self._apply_speed(output_path, speed, is_path=True)
+
         return output_path
 
-    def clone_voice_stream(self, text, speaker_audio_path, language="zh-cn"):
+    def clone_voice_stream(self, text, speaker_audio_path, language="zh-cn", speed=1.0):
         self._validate_audio(speaker_audio_path)
 
         if not text or not text.strip():
             raise ValueError("Text cannot be empty.")
 
+        if speed < 0.5 or speed > 2.0:
+            raise ValueError("Speed must be between 0.5 and 2.0")
+
         text = self._preprocess_text(text, language)
 
-        logger.info(f"Streaming speech for text ({language}): {text[:50]}...")
+        logger.info(f"Streaming speech for text ({language}, speed={speed}): {text[:50]}...")
         wav = self.model.tts(
             text=text,
             speaker_wav=speaker_audio_path,
@@ -161,6 +211,12 @@ class VoiceCloneEngine:
 
         sample_rate = 24000
         wav_np = np.array(wav, dtype=np.float32)
+
+        # Apply speed adjustment if needed
+        if speed != 1.0:
+            import librosa
+            wav_np = librosa.effects.time_stretch(y=wav_np, rate=speed)
+
         wav_int16 = (wav_np * 32767).astype(np.int16)
 
         buffer = io.BytesIO()
@@ -186,6 +242,107 @@ class VoiceCloneEngine:
             {"code": "ar", "name": "Arabic"},
             {"code": "hi", "name": "Hindi"},
         ]
+
+    def clone_voice_sentences(self, text, speaker_audio_path, language="zh-cn", speed=1.0):
+        """Generator that yields each sentence's audio as a BytesIO WAV buffer.
+        
+        This enables streaming playback: the first sentence is sent as soon as
+        it's synthesized, while subsequent sentences are still being processed.
+        
+        Yields:
+            dict: {"audio": BytesIO, "text": str, "is_last": bool}
+        """
+        self._validate_audio(speaker_audio_path)
+
+        if not text or not text.strip():
+            raise ValueError("Text cannot be empty.")
+
+        if speed < 0.5 or speed > 2.0:
+            raise ValueError("Speed must be between 0.5 and 2.0")
+
+        text = self._preprocess_text(text, language)
+
+        import numpy as np
+        import scipy.io.wavfile as wavfile
+        import io
+
+        sample_rate = 24000
+
+        # Split into sentences
+        sentences = self._split_sentences(text, language)
+        logger.info(f"Streaming {len(sentences)} sentences for language {language}")
+
+        for i, sentence in enumerate(sentences):
+            if not sentence.strip():
+                continue
+
+            is_last = (i == len(sentences) - 1)
+            logger.debug(f"Synthesizing sentence {i+1}/{len(sentences)}: {sentence[:40]}...")
+
+            wav = self.model.tts(
+                text=sentence,
+                speaker_wav=speaker_audio_path,
+                language=language,
+                split_sentences=False  # Already split, don't re-split
+            )
+
+            wav_np = np.array(wav, dtype=np.float32)
+
+            # Apply speed adjustment
+            if speed != 1.0:
+                import librosa
+                wav_np = librosa.effects.time_stretch(y=wav_np, rate=speed)
+
+            wav_int16 = (wav_np * 32767).astype(np.int16)
+
+            buffer = io.BytesIO()
+            wavfile.write(buffer, sample_rate, wav_int16)
+            buffer.seek(0)
+
+            yield {"audio": buffer, "text": sentence, "is_last": is_last}
+
+    def _split_sentences(self, text, language="zh-cn"):
+        """Split text into sentences for streaming synthesis.
+        
+        Handles both Chinese and Latin-script punctuation.
+        """
+        # Sentence-ending punctuation patterns
+        if language in ("zh-cn", "ja", "ko"):
+            # CJK: split on Chinese/Japanese/Korean punctuation
+            pattern = r'(?<=[。！？；\n])\s*|(?<=[\.\!\?;]\s+)(?=[A-Z\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af])'
+        else:
+            # Latin: split on . ! ? ; followed by space and capital letter
+            pattern = r'(?<=[\.\!\?;]\s+)(?=[A-Z])'
+
+        # Also split on explicit newlines
+        paragraphs = text.split('\n\n')
+        sentences = []
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            # Split by newlines within paragraph
+            lines = para.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                # For CJK, split on sentence-ending punctuation
+                if language in ("zh-cn", "ja", "ko"):
+                    parts = re.split(r'(?<=[。！？；])', line)
+                    for part in parts:
+                        part = part.strip()
+                        if part:
+                            sentences.append(part)
+                else:
+                    # For Latin, try to split intelligently
+                    parts = re.split(r'(?<=[\.\!\?])\s+', line)
+                    for part in parts:
+                        part = part.strip()
+                        if part:
+                            sentences.append(part)
+
+        return sentences
 
     def is_loaded(self):
         return self._is_loaded

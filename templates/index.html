@@ -398,6 +398,79 @@
             border-color: var(--primary);
         }
 
+        /* ---- Speed Slider ---- */
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            min-width: 180px;
+        }
+        .speed-label {
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+            flex-shrink: 0;
+            min-width: 2.2em;
+        }
+        .speed-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            flex: 1;
+            height: 6px;
+            background: var(--border);
+            border-radius: 3px;
+            outline: none;
+            cursor: pointer;
+        }
+        .speed-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--primary);
+            cursor: pointer;
+            transition: transform 0.15s;
+        }
+        .speed-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+        .speed-value {
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: var(--text);
+            min-width: 2.5em;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        /* ---- Progress ---- */
+        .progress-bar-wrapper {
+            width: 100%;
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            margin-top: 0.75rem;
+            overflow: hidden;
+            display: none;
+        }
+        .progress-bar-wrapper.active { display: block; }
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), var(--success));
+            border-radius: 2px;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .progress-bar-fill.indeterminate {
+            width: 30%;
+            animation: progressIndeterminate 1.5s ease-in-out infinite;
+        }
+        @keyframes progressIndeterminate {
+            0% { transform: translateX(-100%); }
+            50% { transform: translateX(200%); }
+            100% { transform: translateX(400%); }
+        }
+
         /* ---- Buttons ---- */
         .btn {
             display: inline-flex;
@@ -441,6 +514,12 @@
             border: 1px solid rgba(0, 214, 143, 0.3);
         }
         .btn-success:hover:not(:disabled) { background: rgba(0, 214, 143, 0.22); }
+        .btn-accent {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: #fff;
+            border: none;
+        }
+        .btn-accent:hover { opacity: 0.9; }
 
         .btn-sm {
             padding: 0.4rem 0.9rem;
@@ -661,12 +740,23 @@
                         <option value="es">西班牙语</option>
                         <option value="ru">俄语</option>
                     </select>
+                    <div class="speed-control">
+                        <span class="speed-label">语速</span>
+                        <input type="range" class="speed-slider" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0">
+                        <span class="speed-value" id="speedValue">1.0x</span>
+                    </div>
                     <button class="btn btn-primary" id="synthesizeBtn" disabled>
                         &#9654; 生成语音
                     </button>
                     <button class="btn btn-secondary" id="streamBtn" disabled>
                         &#9654; 流式预览
                     </button>
+                    <button class="btn btn-accent" id="streamChunksBtn" disabled>
+                        &#9654; 流式逐句播放
+                    </button>
+                </div>
+                <div class="progress-bar-wrapper" id="progressBarWrapper">
+                    <div class="progress-bar-fill indeterminate" id="progressBarFill"></div>
                 </div>
                 <div class="guidance-tip" id="tip-generate">
                     <span class="tip-icon">&#128161;</span>
@@ -725,8 +815,13 @@
             textInput: document.getElementById('textInput'),
             charCount: document.getElementById('charCount'),
             languageSelect: document.getElementById('languageSelect'),
+            speedSlider: document.getElementById('speedSlider'),
+            speedValue: document.getElementById('speedValue'),
             synthesizeBtn: document.getElementById('synthesizeBtn'),
             streamBtn: document.getElementById('streamBtn'),
+            streamChunksBtn: document.getElementById('streamChunksBtn'),
+            progressBarWrapper: document.getElementById('progressBarWrapper'),
+            progressBarFill: document.getElementById('progressBarFill'),
             resultCard: document.getElementById('resultCard'),
             audioPlayer: document.getElementById('audioPlayer'),
             downloadBtn: document.getElementById('downloadBtn'),
@@ -761,6 +856,17 @@
 
         function hideLoading() {
             elements.loadingOverlay.classList.remove('visible');
+            elements.progressBarWrapper.classList.remove('active');
+        }
+
+        function showProgress() {
+            elements.progressBarWrapper.classList.add('active');
+            elements.progressBarFill.classList.add('indeterminate');
+        }
+
+        function hideProgress() {
+            elements.progressBarWrapper.classList.remove('active');
+            elements.progressBarFill.classList.remove('indeterminate');
         }
 
         function updateSteps() {
@@ -932,6 +1038,7 @@
             const hasText = elements.textInput.value.trim().length > 0;
             elements.synthesizeBtn.disabled = !(hasVoice && hasText);
             elements.streamBtn.disabled = !(hasVoice && hasText);
+            elements.streamChunksBtn.disabled = !(hasVoice && hasText);
             updateSteps();
         }
 
@@ -1024,6 +1131,12 @@
             updateSynthesizeButton();
         });
 
+        /* ---- Speed Slider ---- */
+        elements.speedSlider.addEventListener('input', () => {
+            const val = parseFloat(elements.speedSlider.value);
+            elements.speedValue.textContent = val.toFixed(1) + 'x';
+        });
+
         /* ---- Synthesize ---- */
         elements.synthesizeBtn.addEventListener('click', synthesize);
         elements.streamBtn.addEventListener('click', () => synthesize(true));
@@ -1035,9 +1148,12 @@
             state.isGenerating = true;
             elements.synthesizeBtn.disabled = true;
             elements.streamBtn.disabled = true;
+            elements.streamChunksBtn.disabled = true;
 
+            const speed = parseFloat(elements.speedSlider.value);
             const endpoint = stream ? '/api/stream' : '/api/synthesize';
             showLoading('正在生成语音...\n首次使用可能需要 10-30 秒加载模型');
+            showProgress();
 
             try {
                 if (stream) {
@@ -1047,7 +1163,8 @@
                         body: JSON.stringify({
                             text,
                             voice_id: state.selectedVoiceId,
-                            language: elements.languageSelect.value
+                            language: elements.languageSelect.value,
+                            speed
                         })
                     });
 
@@ -1070,7 +1187,8 @@
                         body: JSON.stringify({
                             text,
                             voice_id: state.selectedVoiceId,
-                            language: elements.languageSelect.value
+                            language: elements.languageSelect.value,
+                            speed
                         })
                     });
 
@@ -1093,6 +1211,125 @@
                 showToast(e.message, 'error');
             } finally {
                 hideLoading();
+                hideProgress();
+                state.isGenerating = false;
+                updateSynthesizeButton();
+            }
+        }
+
+        /* ---- Stream Chunks (逐句播放) ---- */
+        elements.streamChunksBtn.addEventListener('click', streamChunks);
+
+        async function streamChunks() {
+            const text = elements.textInput.value.trim();
+            if (!text || !state.selectedVoiceId || state.isGenerating) return;
+
+            state.isGenerating = true;
+            elements.synthesizeBtn.disabled = true;
+            elements.streamBtn.disabled = true;
+            elements.streamChunksBtn.disabled = true;
+
+            const speed = parseFloat(elements.speedSlider.value);
+            showLoading('正在逐句合成语音...\n首句将在 5-15 秒后开始播放');
+            showProgress();
+
+            let reader = null;
+
+            try {
+                const res = await fetch('/api/stream-chunks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text,
+                        voice_id: state.selectedVoiceId,
+                        language: elements.languageSelect.value,
+                        speed
+                    })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.error || '请求失败');
+                }
+
+                reader = res.body.getReader();
+                let chunksReceived = 0;
+                let buffer = new Uint8Array(0);
+                let firstChunkReceived = false;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const newBuf = new Uint8Array(buffer.length + value.length);
+                    newBuf.set(buffer, 0);
+                    newBuf.set(value, buffer.length);
+                    buffer = newBuf;
+
+                    while (buffer.length >= 4) {
+                        const view = new DataView(buffer.buffer, buffer.byteOffset, 4);
+                        let chunkLen = view.getUint32(0, false);
+                        const isError = (chunkLen & 0x80000000) !== 0;
+                        chunkLen = chunkLen & 0x7FFFFFFF;
+
+                        if (buffer.length < 4 + chunkLen) break;
+
+                        const chunkData = buffer.slice(4, 4 + chunkLen);
+                        buffer = buffer.slice(4 + chunkLen);
+
+                        if (isError) {
+                            const errMsg = new TextDecoder().decode(chunkData);
+                            const errJson = JSON.parse(errMsg);
+                            throw new Error(errJson.error || '流式合成错误');
+                        }
+
+                        chunksReceived++;
+                        showToast(`收到第 ${chunksReceived} 个音频块 (${(chunkData.length / 1024).toFixed(0)} KB)`, 'info');
+
+                        if (!firstChunkReceived) {
+                            firstChunkReceived = true;
+                            hideLoading();
+                            elements.resultCard.classList.add('visible');
+                            document.getElementById('step3').classList.add('completed');
+                            updateSteps();
+                        }
+
+                        // Play via Blob URL + HTML Audio element (same approach as stream preview)
+                        try {
+                            const blob = new Blob([chunkData.buffer.slice(
+                                chunkData.byteOffset,
+                                chunkData.byteOffset + chunkData.byteLength
+                            )], { type: 'audio/wav' });
+                            const url = URL.createObjectURL(blob);
+                            const audio = new Audio(url);
+                            audio.onended = () => URL.revokeObjectURL(url);
+                            audio.play().catch(e => {
+                                showToast(`Audio 播放失败: ${e.message}`, 'error');
+                                URL.revokeObjectURL(url);
+                            });
+                        } catch (e) {
+                            showToast(`块播放异常: ${e.message}`, 'error');
+                        }
+                    }
+                }
+
+                // Stream completed normally
+                elements.tipGenerate.className = 'guidance-tip done';
+                elements.tipGenerate.innerHTML =
+                    `<span class="tip-icon">&#10003;</span><span>流式播放完成！共 ${chunksReceived} 个句子</span>`;
+                if (chunksReceived > 0) {
+                    document.getElementById('step3').classList.add('completed');
+                    updateSteps();
+                }
+
+            } catch (e) {
+                if (reader) {
+                    try { reader.cancel(); } catch (_) {}
+                }
+                showToast(e.message, 'error');
+            } finally {
+                hideLoading();
+                hideProgress();
                 state.isGenerating = false;
                 updateSynthesizeButton();
             }
